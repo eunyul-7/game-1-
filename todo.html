@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>할 일 목록</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1f2328; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #4f46e5; --accent-soft: #eef2ff; --danger: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318; --card: #1b1e25; --text: #e6e8eb; --muted: #9aa1ab;
+      --line: #2c313a; --accent: #818cf8; --accent-soft: #272b45; --danger: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Malgun Gothic", sans-serif;
+    display: flex; justify-content: center; padding: 48px 16px;
+  }
+  .app {
+    width: 100%; max-width: 480px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px; padding: 24px;
+  }
+  h1 { margin: 0 0 16px; font-size: 1.5rem; }
+  button {
+    font: inherit; cursor: pointer; border: none; border-radius: 8px;
+    background: transparent; color: var(--muted);
+  }
+
+  /* 달력 */
+  .cal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .cal-head strong { font-size: 1.1rem; }
+  .cal-head button { font-size: 1.2rem; padding: 4px 10px; }
+  .cal-head button:hover { color: var(--text); background: var(--accent-soft); }
+  .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+  .grid .wd { font-size: .8rem; color: var(--muted); padding: 4px 0; }
+  .grid .wd:first-child, .day.sun { color: var(--danger); }
+  .day {
+    position: relative; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--text); border-radius: 50%;
+  }
+  .day:hover { background: var(--accent-soft); }
+  .day.other { opacity: .35; }
+  .day.today { font-weight: 700; color: var(--accent); }
+  .day.sel { background: var(--accent); color: #fff; }
+  .day.has::after {
+    content: ""; position: absolute; bottom: 12%; width: 5px; height: 5px;
+    border-radius: 50%; background: var(--accent);
+  }
+  .day.sel.has::after { background: #fff; }
+  .day.alldone::after { background: var(--muted); }
+
+  .sel-date { margin: 20px 0 8px; font-weight: 600; }
+  form { display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; padding: 10px 12px; font-size: 1rem; border-radius: 8px;
+    border: 1px solid var(--line); background: transparent; color: var(--text);
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .add { background: var(--accent); color: #fff; padding: 10px 16px; }
+  ul { list-style: none; padding: 0; margin: 16px 0; }
+  li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 4px; border-bottom: 1px solid var(--line);
+  }
+  li input { width: 18px; height: 18px; accent-color: var(--accent); }
+  li span { flex: 1; word-break: break-word; }
+  li.done span { text-decoration: line-through; color: var(--muted); }
+  li .del { font-size: 1.2rem; padding: 0 6px; opacity: .5; }
+  li .del:hover { color: var(--danger); opacity: 1; }
+  .empty { color: var(--muted); justify-content: center; padding: 24px 0; }
+  .footer {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: .9rem; color: var(--muted);
+  }
+  .footer button:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>할 일 목록</h1>
+
+  <div class="cal-head">
+    <button id="prev" title="이전 달">‹</button>
+    <strong id="month"></strong>
+    <button id="next" title="다음 달">›</button>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <div class="sel-date" id="selDate"></div>
+  <form id="form">
+    <input id="input" type="text" placeholder="할 일을 입력하세요" autocomplete="off" autofocus>
+    <button class="add" type="submit">추가</button>
+  </form>
+  <ul id="list"></ul>
+  <div class="footer">
+    <span id="count"></span>
+    <button id="today">오늘로</button>
+  </div>
+</div>
+<script>
+  const KEY = 'todos';
+  const pad = n => String(n).padStart(2, '0');
+  const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const TODAY = ymd(new Date());
+
+  let todos = [];
+  try { todos = JSON.parse(localStorage.getItem(KEY)) || []; } catch {}
+  todos.forEach(t => { if (!t.date) t.date = TODAY; });  // 날짜 없는 예전 항목은 오늘로
+
+  let selected = TODAY;
+  let view = new Date(); view.setDate(1);
+
+  const $ = id => document.getElementById(id);
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(todos)); } catch {} };
+
+  function renderCalendar() {
+    $('month').textContent = `${view.getFullYear()}년 ${view.getMonth() + 1}월`;
+    const grid = $('grid');
+    grid.innerHTML = '';
+    for (const w of ['일', '월', '화', '수', '목', '금', '토']) {
+      const el = document.createElement('div');
+      el.className = 'wd'; el.textContent = w;
+      grid.append(el);
+    }
+    const start = new Date(view);
+    start.setDate(1 - view.getDay());
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start); d.setDate(start.getDate() + i);
+      const key = ymd(d);
+      const items = todos.filter(t => t.date === key);
+      const btn = document.createElement('button');
+      btn.className = 'day';
+      if (d.getMonth() !== view.getMonth()) btn.classList.add('other');
+      if (d.getDay() === 0) btn.classList.add('sun');
+      if (key === TODAY) btn.classList.add('today');
+      if (key === selected) btn.classList.add('sel');
+      if (items.length) btn.classList.add('has');
+      if (items.length && items.every(t => t.done)) btn.classList.add('alldone');
+      btn.textContent = d.getDate();
+      btn.onclick = () => {
+        selected = key;
+        if (d.getMonth() !== view.getMonth()) { view = new Date(d); view.setDate(1); }
+        render();
+      };
+      grid.append(btn);
+    }
+  }
+
+  function renderList() {
+    const [y, m, d] = selected.split('-').map(Number);
+    const wd = '일월화수목금토'[new Date(y, m - 1, d).getDay()];
+    $('selDate').textContent = `${m}월 ${d}일 (${wd})${selected === TODAY ? ' · 오늘' : ''}`;
+
+    const shown = todos.filter(t => t.date === selected);
+    const list = $('list');
+    list.innerHTML = '';
+    if (!shown.length) list.innerHTML = '<li class="empty">이 날의 할 일이 없습니다</li>';
+    for (const t of shown) {
+      const li = document.createElement('li');
+      li.className = t.done ? 'done' : '';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = t.done;
+      cb.onchange = () => { t.done = cb.checked; save(); render(); };
+      const span = document.createElement('span');
+      span.textContent = t.text;
+      span.title = '더블클릭하여 수정';
+      span.ondblclick = () => {
+        const text = prompt('할 일 수정', t.text);
+        if (text && text.trim()) { t.text = text.trim(); save(); render(); }
+      };
+      const del = document.createElement('button');
+      del.className = 'del';
+      del.textContent = '×';
+      del.title = '삭제';
+      del.onclick = () => { todos = todos.filter(x => x !== t); save(); render(); };
+      li.append(cb, span, del);
+      list.append(li);
+    }
+    const left = shown.filter(t => !t.done).length;
+    $('count').textContent = `남은 할 일 ${left}개 / 전체 ${shown.length}개`;
+  }
+
+  function render() { renderCalendar(); renderList(); }
+
+  $('form').onsubmit = e => {
+    e.preventDefault();
+    const text = $('input').value.trim();
+    if (!text) return;
+    todos.push({ text, done: false, date: selected });
+    $('input').value = '';
+    save(); render();
+  };
+  $('prev').onclick = () => { view.setMonth(view.getMonth() - 1); renderCalendar(); };
+  $('next').onclick = () => { view.setMonth(view.getMonth() + 1); renderCalendar(); };
+  $('today').onclick = () => { selected = TODAY; view = new Date(); view.setDate(1); render(); };
+
+  render();
+</script>
+</body>
+</html>

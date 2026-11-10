@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>병아리 슈팅</title>
+<style>
+  :root { --bg: #0f1424; --panel: #151b33; --text: #e8ecf5; --muted: #8b93a8; --accent: #ff8a3d; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: system-ui, "Malgun Gothic", sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+    padding: 16px;
+  }
+  h1 { margin: 0; font-size: 1.4rem; }
+  .hud { display: flex; gap: 20px; font-size: 1rem; color: var(--muted); flex-wrap: wrap; justify-content: center; }
+  .hud b { color: var(--text); }
+  .wrap { position: relative; width: 100%; max-width: 420px; }
+  canvas { display: block; width: 100%; aspect-ratio: 3 / 4; background: var(--panel); border-radius: 12px; touch-action: none; }
+  .overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 10px; background: rgba(15, 20, 36, .78); border-radius: 12px; text-align: center; padding: 16px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h2 { margin: 0; font-size: 1.6rem; }
+  .overlay p { margin: 0; color: var(--muted); line-height: 1.6; }
+  button {
+    font: inherit; font-size: 1.1rem; padding: 10px 28px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<h1>병아리 슈팅</h1>
+<div class="hud">
+  <span>목숨 <b id="lives">❤️❤️❤️</b></span>
+  <span>점수 <b id="score">0</b></span>
+  <span>최고 <b id="best">0</b></span>
+</div>
+<div class="wrap">
+  <canvas id="game" width="480" height="640"></canvas>
+  <div class="overlay" id="overlay">
+    <h2 id="title">병아리 슈팅</h2>
+    <p id="msg"><b>← →</b> (또는 A, D)로 움직이고 <b>스페이스바</b>로 발사!<br>
+      휴대폰은 화면을 누른 채 끌면 움직이면서 자동 발사돼요.<br>
+      목숨은 3개! 적에게 부딪히면 하나씩 줄고 적이 더 빨라져요.</p>
+    <button id="start">시작</button>
+  </div>
+</div>
+<script>
+  const cv = document.getElementById('game');
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const $ = id => document.getElementById(id);
+
+  const MAX_LIVES = 3, HIT_SPEEDUP = 0.6, INVINCIBLE_FRAMES = 90, FIRE_DELAY = 10;
+
+  let best = 0;
+  try { best = Number(localStorage.getItem('shooter-best')) || 0; } catch {}
+  $('best').textContent = best;
+
+  const player = { x: W / 2, y: H - 60, r: 18, speed: 6 };
+  let bullets, enemies, particles, score, lives, hitBoost, invincible, running, frame, nextSpawn, fireCooldown;
+  const keys = { left: false, right: false, fire: false };
+  let touchX = null;
+  const stars = Array.from({ length: 70 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 1.6 + .4 }));
+
+  function showLives() {
+    const n = Math.max(0, Math.min(MAX_LIVES, lives));
+    $('lives').textContent = '❤️'.repeat(n) + '🤍'.repeat(MAX_LIVES - n);
+  }
+
+  function reset() {
+    bullets = []; enemies = []; particles = [];
+    score = 0; lives = MAX_LIVES; hitBoost = 0; invincible = 0;
+    frame = 0; nextSpawn = 40; fireCooldown = 0;
+    player.x = W / 2;
+    showLives();
+    $('score').textContent = 0;
+  }
+
+  // ---- 적 ----
+  const ENEMY_TYPES = [
+    { color: '#7ee0a1', r: 16, hp: 1, pts: 10 },   // 초록 슬라임
+    { color: '#79b8ff', r: 20, hp: 2, pts: 25 },   // 파랑 슬라임
+    { color: '#ff7b9c', r: 26, hp: 4, pts: 60 },   // 분홍 큰 슬라임
+  ];
+
+  function spawnEnemy() {
+    const level = score / 500;
+    const roll = Math.random();
+    const t = roll < 0.12 + level * 0.03 ? 2 : roll < 0.4 + level * 0.05 ? 1 : 0;
+    const type = ENEMY_TYPES[t];
+    enemies.push({
+      ...type,
+      maxHp: type.hp,
+      x: type.r + Math.random() * (W - type.r * 2),
+      y: -type.r,
+      vy: 1.2 + Math.random() * 1.2 + level * 0.3,
+      vx: (Math.random() - 0.5) * 1.5,
+      wobble: Math.random() * Math.PI * 2,
+      flash: 0,
+    });
+    nextSpawn = Math.max(14, 50 - score / 40) * (0.6 + Math.random() * 0.8);
+  }
+
+  function burst(x, y, color, n = 12) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 3;
+      particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 30, color });
+    }
+  }
+
+  // ---- 업데이트 ----
+  function update() {
+    frame++;
+
+    // 이동
+    if (keys.left) player.x -= player.speed;
+    if (keys.right) player.x += player.speed;
+    if (touchX !== null) player.x += Math.max(-player.speed, Math.min(player.speed, touchX - player.x));
+    player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+
+    // 발사 (누르고 있으면 연사, 터치 중엔 자동 발사)
+    if (fireCooldown > 0) fireCooldown--;
+    if ((keys.fire || touchX !== null) && fireCooldown === 0) {
+      bullets.push({ x: player.x, y: player.y - 22 });
+      fireCooldown = FIRE_DELAY;
+    }
+    for (const b of bullets) b.y -= 10;
+    bullets = bullets.filter(b => b.y > -10);
+
+    // 적
+    nextSpawn--;
+    if (nextSpawn <= 0) spawnEnemy();
+    for (const e of enemies) {
+      e.wobble += 0.05;
+      e.x += e.vx + Math.sin(e.wobble) * 0.6;
+      if (e.x < e.r || e.x > W - e.r) e.vx *= -1;
+      e.y += e.vy + hitBoost;
+      if (e.flash > 0) e.flash--;
+    }
+    enemies = enemies.filter(e => e.y - e.r < H);
+
+    // 총알 ↔ 적
+    for (const b of bullets) {
+      for (const e of enemies) {
+        if (e.hp > 0 && Math.hypot(b.x - e.x, b.y - e.y) < e.r + 4) {
+          b.y = -100; e.hp--; e.flash = 4;
+          if (e.hp <= 0) { score += e.pts; burst(e.x, e.y, e.color); }
+          break;
+        }
+      }
+    }
+    enemies = enemies.filter(e => e.hp > 0);
+
+    // 적 ↔ 병아리
+    if (invincible > 0) invincible--;
+    else {
+      for (const e of enemies) {
+        if (Math.hypot(e.x - player.x, e.y - player.y) < e.r + player.r - 6) {
+          lives--;
+          showLives();
+          burst(player.x, player.y, '#ffd93d', 18);
+          if (lives <= 0) return gameOver();
+          hitBoost += HIT_SPEEDUP;
+          invincible = INVINCIBLE_FRAMES;
+          enemies = enemies.filter(x => x !== e);
+          break;
+        }
+      }
+    }
+
+    for (const p of particles) { p.x += p.vx; p.y += p.vy; p.life--; }
+    particles = particles.filter(p => p.life > 0);
+
+    if (frame % 5 === 0) $('score').textContent = score;
+  }
+
+  // ---- 그리기 ----
+  function circle(x, y, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawPlayer() {
+    const { x, y } = player;
+    const dead = !running && lives <= 0;
+    // 발
+    ctx.strokeStyle = '#ff9f43'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x - 6, y + 14); ctx.lineTo(x - 7, y + 22);
+    ctx.moveTo(x + 6, y + 14); ctx.lineTo(x + 7, y + 22);
+    ctx.stroke();
+    // 몸
+    circle(x, y, 19, '#ffd93d');
+    circle(x - 5, y - 6, 8, 'rgba(255,255,255,.35)');
+    // 머리 깃털
+    ctx.fillStyle = '#ffd93d';
+    ctx.beginPath();
+    ctx.ellipse(x - 3, y - 20, 3, 7, -0.4, 0, Math.PI * 2);
+    ctx.ellipse(x + 3, y - 20, 3, 7, 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    // 날개 (파닥)
+    const flap = Math.sin(frame / 4) * 0.3;
+    ctx.fillStyle = '#f7c51e';
+    for (const side of [-1, 1]) {
+      ctx.save(); ctx.translate(x + side * 17, y + 3); ctx.rotate(side * (0.4 + flap));
+      ctx.beginPath(); ctx.ellipse(0, 0, 5, 9, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+    }
+    // 볼터치
+    circle(x - 10, y + 5, 3.5, 'rgba(255,120,150,.55)');
+    circle(x + 10, y + 5, 3.5, 'rgba(255,120,150,.55)');
+    // 눈
+    ctx.strokeStyle = '#2b2b3a'; ctx.lineWidth = 2;
+    for (const ex of [x - 6, x + 6]) {
+      if (dead) {
+        ctx.beginPath();
+        ctx.moveTo(ex - 3, y - 5); ctx.lineTo(ex + 3, y + 1);
+        ctx.moveTo(ex + 3, y - 5); ctx.lineTo(ex - 3, y + 1);
+        ctx.stroke();
+      } else if (frame % 150 > 144) {
+        ctx.beginPath(); ctx.moveTo(ex - 3, y - 2); ctx.lineTo(ex + 3, y - 2); ctx.stroke();
+      } else {
+        circle(ex, y - 2, 3.5, '#2b2b3a');
+        circle(ex + 1.2, y - 3.2, 1.3, '#fff');
+      }
+    }
+    // 부리 (위를 향함)
+    ctx.fillStyle = '#ff9f43';
+    ctx.beginPath(); ctx.moveTo(x - 4, y + 4); ctx.lineTo(x + 4, y + 4); ctx.lineTo(x, y + 10); ctx.closePath(); ctx.fill();
+  }
+
+  function drawEnemy(e) {
+    const squish = 1 + Math.sin(e.wobble * 3) * 0.06;
+    ctx.save(); ctx.translate(e.x, e.y); ctx.scale(squish, 2 - squish);
+    ctx.fillStyle = e.flash ? '#ffffff' : e.color;
+    ctx.beginPath();
+    ctx.arc(0, 0, e.r, Math.PI, 0);
+    ctx.lineTo(e.r, e.r * 0.6);
+    ctx.quadraticCurveTo(0, e.r * 0.9, -e.r, e.r * 0.6);
+    ctx.closePath(); ctx.fill();
+    // 눈
+    const s = e.r / 16;
+    circle(-5 * s, -2 * s, 2.5 * s, '#2b2b3a');
+    circle(5 * s, -2 * s, 2.5 * s, '#2b2b3a');
+    ctx.restore();
+    // 체력바 (2칸 이상인 적만)
+    if (e.maxHp > 1) {
+      ctx.fillStyle = 'rgba(0,0,0,.4)'; ctx.fillRect(e.x - e.r, e.y - e.r - 10, e.r * 2, 4);
+      ctx.fillStyle = '#ffffff'; ctx.fillRect(e.x - e.r, e.y - e.r - 10, e.r * 2 * (e.hp / e.maxHp), 4);
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    for (const s of stars) {
+      if (running) { s.y += s.s * (0.6 + hitBoost * 0.3); if (s.y > H) { s.y = 0; s.x = Math.random() * W; } }
+      ctx.fillRect(s.x, s.y, s.s, s.s);
+    }
+    ctx.fillStyle = '#fff3a0';
+    for (const b of bullets) { ctx.beginPath(); ctx.ellipse(b.x, b.y, 3, 8, 0, 0, Math.PI * 2); ctx.fill(); }
+    for (const e of enemies) drawEnemy(e);
+    for (const p of particles) {
+      ctx.globalAlpha = p.life / 30;
+      ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+    if (invincible === 0 || Math.floor(invincible / 5) % 2 === 0) drawPlayer();
+  }
+
+  function loop() {
+    if (!running) return;
+    update();
+    draw();
+    if (running) requestAnimationFrame(loop);
+  }
+
+  function start() {
+    reset();
+    running = true;
+    $('overlay').classList.add('hidden');
+    loop();
+  }
+
+  function gameOver() {
+    running = false;
+    draw();
+    $('score').textContent = score;
+    const isBest = score > best;
+    if (isBest) {
+      best = score;
+      try { localStorage.setItem('shooter-best', best); } catch {}
+      $('best').textContent = best;
+    }
+    $('title').textContent = '게임 오버';
+    $('msg').innerHTML = `점수: <b>${score}</b>` + (isBest ? '<br>🎉 최고 기록!' : '') + '<br>엔터를 눌러 다시 시작';
+    $('start').textContent = '다시 하기';
+    $('overlay').classList.remove('hidden');
+  }
+
+  // ---- 조작 ----
+  const setKey = (e, down) => {
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = down;
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = down;
+    else if (e.code === 'Space') keys.fire = down;
+    else return false;
+    return true;
+  };
+  addEventListener('keydown', e => {
+    if (setKey(e, true)) e.preventDefault();
+    if (!running && (e.code === 'Enter' || e.code === 'Space') && !e.repeat) { e.preventDefault(); start(); }
+  });
+  addEventListener('keyup', e => setKey(e, false));
+
+  const toCanvasX = e => {
+    const rect = cv.getBoundingClientRect();
+    return (e.clientX - rect.left) * (W / rect.width);
+  };
+  cv.addEventListener('pointerdown', e => { e.preventDefault(); if (!running) return start(); touchX = toCanvasX(e); });
+  cv.addEventListener('pointermove', e => { if (touchX !== null) touchX = toCanvasX(e); });
+  addEventListener('pointerup', () => { touchX = null; });
+
+  $('start').onclick = e => { e.currentTarget.blur(); start(); };
+  reset();
+  draw();
+</script>
+</body>
+</html>
