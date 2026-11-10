@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>병아리 슈팅</title>
 <style>
-  :root { --bg: #0f1424; --panel: #151b33; --text: #e8ecf5; --muted: #8b93a8; --accent: #ff8a3d; }
+  :root { --bg: #fde7f1; --panel: #cfe9ff; --text: #4a3b5c; --muted: #8a7a9b; --accent: #ff8fab; }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
@@ -18,9 +18,16 @@
   .hud b { color: var(--text); }
   .wrap { position: relative; width: 100%; max-width: 420px; }
   canvas { display: block; width: 100%; aspect-ratio: 3 / 4; background: var(--panel); border-radius: 12px; touch-action: none; }
+  body { background: linear-gradient(180deg, #ffe3ef, #e3f0ff); }
+  .ctrls { display: flex; gap: 8px; }
+  .ctrl {
+    font-size: .95rem; padding: 6px 12px; border-radius: 999px;
+    background: #fff; color: var(--text); border: 2px solid #f3c6d8;
+  }
+  .ctrl:hover { background: #fff3f8; }
   .overlay {
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 10px; background: rgba(15, 20, 36, .78); border-radius: 12px; text-align: center; padding: 16px;
+    gap: 10px; background: rgba(255, 245, 250, .85); border-radius: 12px; text-align: center; padding: 16px;
   }
   .overlay.hidden { display: none; }
   .overlay h2 { margin: 0; font-size: 1.6rem; }
@@ -37,6 +44,11 @@
   <span>목숨 <b id="lives">❤️❤️❤️</b></span>
   <span>점수 <b id="score">0</b></span>
   <span>최고 <b id="best">0</b></span>
+  <span>레벨 <b id="level">1</b></span>
+</div>
+<div class="ctrls">
+  <button class="ctrl" id="pauseBtn" title="일시정지 (P)">⏸ 일시정지</button>
+  <button class="ctrl" id="soundBtn" title="소리 켜기/끄기 (M)">🔊 소리 켬</button>
 </div>
 <div class="wrap">
   <canvas id="game" width="480" height="640"></canvas>
@@ -44,7 +56,9 @@
     <h2 id="title">병아리 슈팅</h2>
     <p id="msg"><b>← →</b> (또는 A, D)로 움직이고 <b>스페이스바</b>로 발사!<br>
       휴대폰은 화면을 누른 채 끌면 움직이면서 자동 발사돼요.<br>
-      목숨은 3개! 적에게 부딪히면 하나씩 줄고 적이 더 빨라져요.</p>
+      목숨은 3개! 적에게 부딪히면 하나씩 줄고 적이 더 빨라져요.<br>
+      시간이 지날수록 레벨이 올라 점점 어려워져요.<br>
+      <b>P</b> 일시정지 · <b>M</b> 소리 끄기</p>
     <button id="start">시작</button>
   </div>
 </div>
@@ -60,11 +74,67 @@
   try { best = Number(localStorage.getItem('shooter-best')) || 0; } catch {}
   $('best').textContent = best;
 
+  // ---- 효과음 (음악 파일 없이 Web Audio API로 만듦) ----
+  let muted = false;
+  try { muted = localStorage.getItem('shooter-muted') === '1'; } catch {}
+  let audio = null;
+  function getAudio() {
+    if (!audio) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audio = new AC();
+    }
+    if (audio.state === 'suspended') audio.resume();
+    return audio;
+  }
+  // 짧은 음 하나: 시작 주파수 → 끝 주파수로 미끄러지는 소리
+  function tone(freq, endFreq, dur, type = 'square', vol = 0.08, delay = 0) {
+    if (muted) return;
+    const ac = getAudio(); if (!ac) return;
+    const t = ac.currentTime + delay;
+    const osc = ac.createOscillator(), gain = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t);
+    osc.frequency.exponentialRampToValueAtTime(endFreq, t + dur);
+    gain.gain.setValueAtTime(vol, t);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t); osc.stop(t + dur);
+  }
+  const sfx = {
+    shoot:   () => tone(880, 1400, 0.06, 'square', 0.03),
+    hit:     () => tone(300, 200, 0.05, 'triangle', 0.06),
+    pop:     () => { tone(520, 1200, 0.1, 'sine', 0.12); tone(1000, 1600, 0.08, 'sine', 0.06, 0.05); },
+    hurt:    () => { tone(400, 90, 0.35, 'sawtooth', 0.1); },
+    levelUp: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.12, 'triangle', 0.1, i * 0.09)),
+    over:    () => [523, 392, 330, 262].forEach((f, i) => tone(f, f * 0.98, 0.22, 'triangle', 0.12, i * 0.18)),
+    start:   () => [392, 523, 659].forEach((f, i) => tone(f, f, 0.1, 'triangle', 0.1, i * 0.08)),
+    pause:   () => tone(660, 440, 0.12, 'sine', 0.1),
+  };
+  function showSound() { $('soundBtn').textContent = muted ? '🔇 소리 끔' : '🔊 소리 켬'; }
+  function toggleSound() {
+    muted = !muted;
+    try { localStorage.setItem('shooter-muted', muted ? '1' : '0'); } catch {}
+    showSound();
+    if (!muted) tone(660, 880, 0.1, 'sine', 0.1);
+  }
+  showSound();
+
   const player = { x: W / 2, y: H - 60, r: 18, speed: 6 };
   let bullets, enemies, particles, score, lives, hitBoost, invincible, running, frame, nextSpawn, fireCooldown;
+  let paused = false, level = 1, levelBanner = 0;
+  const LEVEL_FRAMES = 20 * 60;   // 약 20초마다 레벨 업
   const keys = { left: false, right: false, fire: false };
   let touchX = null;
-  const stars = Array.from({ length: 70 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 1.6 + .4 }));
+  // 배경: 몽글몽글 구름 + 반짝이 + 하트
+  const clouds = Array.from({ length: 6 }, () => ({ x: Math.random() * W, y: Math.random() * H, s: 0.6 + Math.random() * 0.8 }));
+  const sparkles = Array.from({ length: 28 }, () => ({
+    x: Math.random() * W, y: Math.random() * H, s: 0.5 + Math.random(), t: Math.random() * 6, heart: Math.random() < 0.3,
+  }));
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+  skyGrad.addColorStop(0, '#bfe4ff');
+  skyGrad.addColorStop(0.6, '#e6dcff');
+  skyGrad.addColorStop(1, '#ffdcec');
 
   function showLives() {
     const n = Math.max(0, Math.min(MAX_LIVES, lives));
@@ -75,8 +145,11 @@
     bullets = []; enemies = []; particles = [];
     score = 0; lives = MAX_LIVES; hitBoost = 0; invincible = 0;
     frame = 0; nextSpawn = 40; fireCooldown = 0;
+    paused = false; level = 1; levelBanner = 0;
     player.x = W / 2;
     showLives();
+    $('level').textContent = 1;
+    $('pauseBtn').textContent = '⏸ 일시정지';
     $('score').textContent = 0;
   }
 
@@ -87,22 +160,25 @@
     { color: '#ff7b9c', r: 26, hp: 4, pts: 60 },   // 분홍 큰 슬라임
   ];
 
+  // 난이도: 시간에 따라 오르는 레벨 + 점수
+  function difficulty() { return (level - 1) + score / 1000; }
+
   function spawnEnemy() {
-    const level = score / 500;
+    const d = difficulty();
     const roll = Math.random();
-    const t = roll < 0.12 + level * 0.03 ? 2 : roll < 0.4 + level * 0.05 ? 1 : 0;
+    const t = roll < Math.min(0.35, 0.1 + d * 0.04) ? 2 : roll < Math.min(0.7, 0.38 + d * 0.05) ? 1 : 0;
     const type = ENEMY_TYPES[t];
     enemies.push({
       ...type,
       maxHp: type.hp,
       x: type.r + Math.random() * (W - type.r * 2),
       y: -type.r,
-      vy: 1.2 + Math.random() * 1.2 + level * 0.3,
+      vy: 1.2 + Math.random() * 1.2 + Math.min(4, d * 0.35),
       vx: (Math.random() - 0.5) * 1.5,
       wobble: Math.random() * Math.PI * 2,
       flash: 0,
     });
-    nextSpawn = Math.max(14, 50 - score / 40) * (0.6 + Math.random() * 0.8);
+    nextSpawn = Math.max(10, 50 - d * 5) * (0.6 + Math.random() * 0.8);
   }
 
   function burst(x, y, color, n = 12) {
@@ -116,6 +192,16 @@
   function update() {
     frame++;
 
+    // 시간이 지나면 레벨 업
+    const newLevel = 1 + Math.floor(frame / LEVEL_FRAMES);
+    if (newLevel > level) {
+      level = newLevel;
+      $('level').textContent = level;
+      levelBanner = 90;
+      sfx.levelUp();
+    }
+    if (levelBanner > 0) levelBanner--;
+
     // 이동
     if (keys.left) player.x -= player.speed;
     if (keys.right) player.x += player.speed;
@@ -127,6 +213,7 @@
     if ((keys.fire || touchX !== null) && fireCooldown === 0) {
       bullets.push({ x: player.x, y: player.y - 22 });
       fireCooldown = FIRE_DELAY;
+      sfx.shoot();
     }
     for (const b of bullets) b.y -= 10;
     bullets = bullets.filter(b => b.y > -10);
@@ -148,7 +235,8 @@
       for (const e of enemies) {
         if (e.hp > 0 && Math.hypot(b.x - e.x, b.y - e.y) < e.r + 4) {
           b.y = -100; e.hp--; e.flash = 4;
-          if (e.hp <= 0) { score += e.pts; burst(e.x, e.y, e.color); }
+          if (e.hp <= 0) { score += e.pts; burst(e.x, e.y, e.color); sfx.pop(); }
+          else sfx.hit();
           break;
         }
       }
@@ -164,6 +252,7 @@
           showLives();
           burst(player.x, player.y, '#ffd93d', 18);
           if (lives <= 0) return gameOver();
+          sfx.hurt();
           hitBoost += HIT_SPEEDUP;
           invincible = INVINCIBLE_FRAMES;
           enemies = enemies.filter(x => x !== e);
@@ -241,8 +330,11 @@
     ctx.lineTo(e.r, e.r * 0.6);
     ctx.quadraticCurveTo(0, e.r * 0.9, -e.r, e.r * 0.6);
     ctx.closePath(); ctx.fill();
-    // 눈
+    ctx.strokeStyle = 'rgba(74,59,92,.55)'; ctx.lineWidth = 2; ctx.stroke();
+    // 눈 + 볼
     const s = e.r / 16;
+    circle(-9 * s, 4 * s, 2.5 * s, 'rgba(255,120,150,.5)');
+    circle(9 * s, 4 * s, 2.5 * s, 'rgba(255,120,150,.5)');
     circle(-5 * s, -2 * s, 2.5 * s, '#2b2b3a');
     circle(5 * s, -2 * s, 2.5 * s, '#2b2b3a');
     ctx.restore();
@@ -253,15 +345,59 @@
     }
   }
 
-  function draw() {
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(255,255,255,.5)';
-    for (const s of stars) {
-      if (running) { s.y += s.s * (0.6 + hitBoost * 0.3); if (s.y > H) { s.y = 0; s.x = Math.random() * W; } }
-      ctx.fillRect(s.x, s.y, s.s, s.s);
+  function drawCloud(x, y, s) {
+    ctx.fillStyle = 'rgba(255,255,255,.8)';
+    ctx.beginPath();
+    ctx.arc(x, y, 22 * s, 0, Math.PI * 2);
+    ctx.arc(x + 24 * s, y - 10 * s, 26 * s, 0, Math.PI * 2);
+    ctx.arc(x + 50 * s, y, 20 * s, 0, Math.PI * 2);
+    ctx.rect(x, y, 50 * s, 20 * s);
+    ctx.fill();
+  }
+
+  function drawHeart(x, y, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x, y + r * 0.9);
+    ctx.bezierCurveTo(x - r * 1.6, y - r * 0.2, x - r * 0.6, y - r * 1.4, x, y - r * 0.4);
+    ctx.bezierCurveTo(x + r * 0.6, y - r * 1.4, x + r * 1.6, y - r * 0.2, x, y + r * 0.9);
+    ctx.fill();
+  }
+
+  function drawBackground() {
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H);
+    const moving = running && !paused;
+    const flow = 0.5 + Math.min(3, difficulty() * 0.15 + hitBoost * 0.3);  // 어려워질수록 배경도 빨리 흐름
+    for (const c of clouds) {
+      if (moving) { c.y += c.s * flow; if (c.y - 40 > H) { c.y = -40; c.x = Math.random() * (W - 60); } }
+      drawCloud(c.x, c.y, c.s);
     }
-    ctx.fillStyle = '#fff3a0';
-    for (const b of bullets) { ctx.beginPath(); ctx.ellipse(b.x, b.y, 3, 8, 0, 0, Math.PI * 2); ctx.fill(); }
+    for (const s of sparkles) {
+      if (moving) { s.y += s.s * flow * 0.8; s.t += 0.08; if (s.y > H + 10) { s.y = -10; s.x = Math.random() * W; } }
+      const a = 0.4 + Math.sin(s.t) * 0.35;
+      if (s.heart) { ctx.globalAlpha = a; drawHeart(s.x, s.y, 5 * s.s, '#ff9cc0'); }
+      else {
+        ctx.globalAlpha = a; ctx.fillStyle = '#ffffff';
+        const r = 3 * s.s;
+        ctx.beginPath();
+        ctx.moveTo(s.x, s.y - r * 2); ctx.lineTo(s.x + r * 0.5, s.y - r * 0.5); ctx.lineTo(s.x + r * 2, s.y);
+        ctx.lineTo(s.x + r * 0.5, s.y + r * 0.5); ctx.lineTo(s.x, s.y + r * 2); ctx.lineTo(s.x - r * 0.5, s.y + r * 0.5);
+        ctx.lineTo(s.x - r * 2, s.y); ctx.lineTo(s.x - r * 0.5, s.y - r * 0.5); ctx.closePath(); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function draw() {
+    drawBackground();
+    // 총알: 작은 노란 별 모양 알
+    for (const b of bullets) {
+      ctx.fillStyle = '#ff9f43';
+      ctx.beginPath(); ctx.ellipse(b.x, b.y, 4.5, 9, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff3a0';
+      ctx.beginPath(); ctx.ellipse(b.x, b.y, 2.5, 6, 0, 0, Math.PI * 2); ctx.fill();
+    }
     for (const e of enemies) drawEnemy(e);
     for (const p of particles) {
       ctx.globalAlpha = p.life / 30;
@@ -269,24 +405,55 @@
     }
     ctx.globalAlpha = 1;
     if (invincible === 0 || Math.floor(invincible / 5) % 2 === 0) drawPlayer();
+    if (levelBanner > 0) {
+      ctx.globalAlpha = Math.min(1, levelBanner / 30);
+      ctx.fillStyle = '#ff6f9f'; ctx.textAlign = 'center';
+      ctx.font = 'bold 36px system-ui, "Malgun Gothic", sans-serif';
+      ctx.fillText(`레벨 ${level}! ✨`, W / 2, H / 3);
+      ctx.globalAlpha = 1;
+    }
   }
 
   function loop() {
-    if (!running) return;
+    if (!running || paused) return;
     update();
     draw();
-    if (running) requestAnimationFrame(loop);
+    if (running && !paused) requestAnimationFrame(loop);
   }
 
   function start() {
     reset();
     running = true;
     $('overlay').classList.add('hidden');
+    sfx.start();
     loop();
   }
 
+  // ---- 일시정지 ----
+  function togglePause() {
+    if (!running) return;
+    paused = !paused;
+    keys.left = keys.right = keys.fire = false; touchX = null;
+    $('pauseBtn').textContent = paused ? '▶ 계속하기' : '⏸ 일시정지';
+    sfx.pause();
+    if (paused) {
+      draw();
+      ctx.fillStyle = 'rgba(255,245,250,.7)'; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#4a3b5c'; ctx.textAlign = 'center';
+      ctx.font = 'bold 40px system-ui, "Malgun Gothic", sans-serif';
+      ctx.fillText('⏸ 일시정지', W / 2, H / 2 - 10);
+      ctx.font = '18px system-ui, "Malgun Gothic", sans-serif';
+      ctx.fillText('P 키나 계속하기 버튼을 누르세요', W / 2, H / 2 + 28);
+    } else {
+      loop();
+    }
+  }
+  // 다른 창으로 가면 자동으로 일시정지
+  document.addEventListener('visibilitychange', () => { if (document.hidden && running && !paused) togglePause(); });
+
   function gameOver() {
     running = false;
+    sfx.over();
     draw();
     $('score').textContent = score;
     const isBest = score > best;
@@ -310,6 +477,9 @@
     return true;
   };
   addEventListener('keydown', e => {
+    if (e.code === 'KeyP' && !e.repeat) return togglePause();
+    if (e.code === 'KeyM' && !e.repeat) return toggleSound();
+    if (paused) return;
     if (setKey(e, true)) e.preventDefault();
     if (!running && (e.code === 'Enter' || e.code === 'Space') && !e.repeat) { e.preventDefault(); start(); }
   });
@@ -319,8 +489,15 @@
     const rect = cv.getBoundingClientRect();
     return (e.clientX - rect.left) * (W / rect.width);
   };
-  cv.addEventListener('pointerdown', e => { e.preventDefault(); if (!running) return start(); touchX = toCanvasX(e); });
-  cv.addEventListener('pointermove', e => { if (touchX !== null) touchX = toCanvasX(e); });
+  cv.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (!running) return start();
+    if (paused) return togglePause();
+    touchX = toCanvasX(e);
+  });
+  cv.addEventListener('pointermove', e => { if (touchX !== null && !paused) touchX = toCanvasX(e); });
+  $('pauseBtn').onclick = e => { e.currentTarget.blur(); togglePause(); };
+  $('soundBtn').onclick = e => { e.currentTarget.blur(); toggleSound(); };
   addEventListener('pointerup', () => { touchX = null; });
 
   $('start').onclick = e => { e.currentTarget.blur(); start(); };
